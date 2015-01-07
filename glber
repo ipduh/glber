@@ -1,0 +1,175 @@
+#!/bin/bash
+
+# g0 2014, http://ipduh.com/contact
+# GLBer Creates the RouterOS configuration commands and a RouterOS script for the g0 Load BalanER aka GLBer.
+# GLBer balances traffic among n point-to-point and point-to-multipoint interfaces.
+# GLBer NATs and Masquerades.
+# GLBer watches if the interfaces-gateways have Internet Access every 10 minutes and adjusts accordingly.
+# Quick how-to at http://sl.ipduh.com/glber
+
+
+echo
+echo "GLBer, g0 2014"
+echo "Quick How-To: http://sl.ipduh.com/glber"
+echo
+
+
+if [ "$1" == "file" ]
+then
+
+  if [ -f "${2}" ]
+  then
+    . ${2}
+    declare -a GATEWAYS=(`echo "${GWS}"`)
+    declare -a INTERFACES=(`echo "${IFFS}"`)
+  else
+    echo "Unable to read configuration file ${2}"
+    exit 6
+  fi
+
+else
+
+  echo -n "Enter gateways: "
+  read GWS
+  declare -a GATEWAYS=(`echo "${GWS}"`)
+
+  echo -n "Enter interfaces: "
+  read IFFS
+  declare -a INTERFACES=(`echo "${IFFS}"`)
+
+fi
+
+
+if [ -z "$IFFS" ] ; then
+  INTERFACES=("${GATEWAYS[@]}")
+fi
+
+
+if [ "${#GATEWAYS[@]}" -ne "${#INTERFACES[@]}" ]
+then
+  echo "Count of Gateways does not much the cound of Interfaces."
+  exit 3
+fi
+
+
+EPOCH=`date -u +%s`
+
+mkdir -p ~/glber
+echo "GWS=\"$GWS\"" > ~/glber/${EPOCH}.log
+echo "IFFS=\"$IFFS\"" >> ~/glber/${EPOCH}.log
+
+
+ECMP=""
+MIKAR=""
+GW_COUNT="${#GATEWAYS[@]}"
+let "GW_LAST_NUM= ${#GATEWAYS[@]} - 1"
+
+POS=0
+while [ "$POS" -lt "${#GATEWAYS[@]}" ]
+do
+
+	if [ "${POS}" -eq "$GW_LAST_NUM" ]
+	then
+		#g0#ECMP+="${GATEWAYS[$POS]}", $POS you would think but nope
+		ECMP+="${GATEWAYS[POS]}"
+		MIKAR+="\"${GATEWAYS[POS]}\""
+	else
+		ECMP+="${GATEWAYS[POS]},"
+		MIKAR+="\"${GATEWAYS[POS]}\";"
+	fi
+
+  ((POS++))
+
+done
+
+echo
+echo "$0"
+echo "###RouterOS Commands###"
+echo
+
+echo "/ip route"
+echo "add dst-address=0.0.0.0/0 gateway=$ECMP check-gateway=ping comment=lbercur ;"
+echo
+echo "/ip firewall nat"
+for i in "${INTERFACES[@]}"; do
+  echo "add chain=srcnat out-interface=${i} action=masquerade comment=GLBer_${i}_nat ;"
+done
+echo
+echo "/ip firewall mangle"
+for i in "${INTERFACES[@]}"; do
+  echo "add chain=input in-interface=${i} action=mark-connection new-connection-mark=${i}_c comment=GLBer_mangle ;"
+  echo "add chain=output connection-mark=${i}_c action=mark-routing new-routing-mark=to_${i} comment=GLBer_mangle ;"
+done
+echo
+echo "/ip route"
+j=0
+for i in "${GATEWAYS[@]}"; do
+  echo "add dst-address=0.0.0.0/0 gateway=${i} routing-mark=to_${INTERFACES[j]} comment=GLBER ;"
+  ((j++))
+done
+
+echo
+echo "###RouterOS GLBer Script###"
+echo "###Add the following script to the Router 's 'script-repository' and name it glber###"
+echo
+
+read -r -d '' SCR <<- 'SCRIPTT'
+:local goodgates " "
+:local gcount 0
+:local coma ""
+:local lbercur "lbercur"
+:local lbertmp "lbertmp"
+:local pong "8.8.8.8"
+
+:foreach g in=$gateways do={
+:if ( $gcount > 0 ) do={ :set coma (",") }
+:if ([/ping $pong interface="$g" count=3] = 0) do={  }  else={
+:set $goodgates ( "$goodgates" . "$coma" . "$g" ) ;
+:set gcount ($gcount+1)
+}
+};
+
+/ip route set [find comment=$lbercur] distance=2
+/ip route add dst-address=0.0.0.0/0 gateway=$goodgates check-gateway=ping comment="$lbertmp"
+/ip route remove [find comment=$lbercur]
+/ip route add dst-address=0.0.0.0/0 gateway=$goodgates check-gateway=ping comment="$lbercur"
+/ip route remove [find comment=$lbertmp]
+
+}
+SCRIPTT
+
+echo "{ "
+echo "#GLBer -- g0 2014 -- http://sl.ipduh.com/glber"
+echo "#GLBer run ${EPOCH} "
+echo ":local gateways { ${MIKAR} };"
+echo "${SCR}"
+
+echo
+echo "###Schedule the above RouterOS Script using the following RouterOS Command###"
+echo "/system scheduler add name=glber policy=read,write,test interval=10m ;"
+echo
+
+echo
+echo "###RouterOS commands to remove the GLBer configuration###"
+
+echo
+echo "/ip route"
+echo "remove [find comment=lbercur]"
+echo "remove [find comment=GLBER]"
+
+echo
+echo "/ip firewall nat"
+for i in "${INTERFACES[@]}"; do
+echo "remove [find comment=GLBer_${i}_nat]"
+done
+
+echo
+echo "/ip firewall mangle remove [find comment=GLBer_mangle]"
+
+echo
+echo "/system scheduler remove glber"
+
+echo
+echo
+
+exit 0
